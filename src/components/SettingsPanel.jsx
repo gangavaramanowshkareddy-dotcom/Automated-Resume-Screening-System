@@ -1,4 +1,5 @@
-﻿import { useRef, useState } from "react";
+﻿
+import { useEffect, useRef, useState } from "react";
 import {
   X,
   UserRound,
@@ -15,18 +16,21 @@ import { useSettings } from "./SettingsContext";
 import apiClient from "../api/client";
 
 function SettingsPanel({ onClose }) {
-  const { settings, updateSettings, themes } = useSettings();
+  const {
+    settings,
+    updateSettings,
+    themes,
+    profileLoading,
+  } = useSettings();
 
   const fileInputRef = useRef(null);
 
   const [profileName, setProfileName] = useState(
     settings.profileName || ""
   );
-
   const [username, setUsername] = useState(
     settings.username || ""
   );
-
   const [profileImage, setProfileImage] = useState(
     settings.profileImage || ""
   );
@@ -39,10 +43,7 @@ function SettingsPanel({ onClose }) {
 
   const [showCurrentPassword, setShowCurrentPassword] =
     useState(false);
-
-  const [showNewPassword, setShowNewPassword] =
-    useState(false);
-
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] =
     useState(false);
 
@@ -51,39 +52,122 @@ function SettingsPanel({ onClose }) {
   const [passwordLoading, setPasswordLoading] = useState(false);
 
   const [profileSaved, setProfileSaved] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState("");
+
+  // Update the form when the backend profile is loaded.
+  useEffect(() => {
+    setProfileName(settings.profileName || "");
+    setUsername(settings.username || "");
+    setProfileImage(settings.profileImage || "");
+  }, [
+    settings.profileName,
+    settings.username,
+    settings.profileImage,
+  ]);
 
   const handleImageChange = (event) => {
     const file = event.target.files?.[0];
 
-    if (!file) {
-      return;
-    }
+    if (!file) return;
+
+    setProfileError("");
+    setProfileSaved(false);
 
     if (!file.type.startsWith("image/")) {
+      setProfileError("Please select a valid image file.");
+      event.target.value = "";
       return;
     }
 
     const reader = new FileReader();
 
     reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        setProfileError("Unable to read the selected image.");
+        return;
+      }
+
+      // The backend accepts profile images up to 1,500,000 characters.
+      if (reader.result.length > 1_500_000) {
+        setProfileError(
+          "This image is too large. Please choose a smaller image."
+        );
+        event.target.value = "";
+        return;
+      }
+
       setProfileImage(reader.result);
+    };
+
+    reader.onerror = () => {
+      setProfileError("Unable to read the selected image.");
     };
 
     reader.readAsDataURL(file);
   };
 
-  const handleSaveProfile = () => {
-    updateSettings({
-      profileName,
-      username,
-      profileImage,
-    });
+  const handleSaveProfile = async () => {
+    setProfileError("");
+    setProfileSaved(false);
 
-    setProfileSaved(true);
+    const trimmedName = profileName.trim();
+    const trimmedUsername = username.trim();
 
-    setTimeout(() => {
-      setProfileSaved(false);
-    }, 2500);
+    if (!trimmedName || !trimmedUsername) {
+      setProfileError("HR Name and Username are required.");
+      return;
+    }
+
+    if (trimmedName.length > 255 || trimmedUsername.length > 255) {
+      setProfileError("HR Name and Username must be 255 characters or fewer.");
+      return;
+    }
+
+    if (profileImage.length > 1_500_000) {
+      setProfileError(
+        "The profile image is too large. Please choose a smaller image."
+      );
+      return;
+    }
+
+    try {
+      setProfileSaving(true);
+
+      const response = await apiClient.put("/api/auth/profile", {
+        profile_name: trimmedName,
+        profile_username: trimmedUsername,
+        profile_image: profileImage || "",
+      });
+
+      const savedProfile = response.data;
+
+      // Update the shared UI only after the server confirms the save.
+      updateSettings({
+        profileName: savedProfile.profile_name || trimmedName,
+        username: savedProfile.profile_username || trimmedUsername,
+        profileImage: savedProfile.profile_image || "",
+        role: savedProfile.role || settings.role || "HR",
+      });
+
+      setProfileName(savedProfile.profile_name || trimmedName);
+      setUsername(savedProfile.profile_username || trimmedUsername);
+      setProfileImage(savedProfile.profile_image || "");
+      setProfileSaved(true);
+    } catch (error) {
+      console.error("Error saving profile:", error);
+
+      const detail = error.response?.data?.detail;
+
+      setProfileError(
+        Array.isArray(detail)
+          ? detail.map((item) => item.msg || String(item)).join(", ")
+          : detail ||
+              "Unable to save your profile. Please try again."
+      );
+    } finally {
+      setProfileSaving(false);
+    }
   };
 
   const handleChangePassword = async (event) => {
@@ -93,16 +177,12 @@ function SettingsPanel({ onClose }) {
     setPasswordError("");
 
     if (!currentPassword) {
-      setPasswordError(
-        "Please enter your current password."
-      );
+      setPasswordError("Please enter your current password.");
       return;
     }
 
     if (!newPassword) {
-      setPasswordError(
-        "Please enter a new password."
-      );
+      setPasswordError("Please enter a new password.");
       return;
     }
 
@@ -139,66 +219,37 @@ function SettingsPanel({ onClose }) {
       );
 
       setPasswordMessage(
-        response.data?.message ||
-          "Password changed successfully."
+        response.data?.message || "Password changed successfully."
       );
 
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
     } catch (error) {
-      console.error(
-        "Error changing password:",
-        error
+      console.error("Error changing password:", error);
+
+      const detail = error.response?.data?.detail;
+
+      setPasswordError(
+        Array.isArray(detail)
+          ? detail.map((item) => item.msg || String(item)).join(", ")
+          : detail ||
+              "Unable to change password. Please try again."
       );
-
-      const detail =
-        error?.response?.data?.detail;
-
-      if (Array.isArray(detail)) {
-        setPasswordError(
-          detail
-            .map((item) => item.msg)
-            .join(", ")
-        );
-      } else {
-        setPasswordError(
-          detail ||
-            "Unable to change password. Please try again."
-        );
-      }
     } finally {
       setPasswordLoading(false);
     }
   };
 
   const handleThemeChange = (themeName) => {
-    updateSettings({
-      theme: themeName,
-    });
+    updateSettings({ theme: themeName });
   };
 
   const sectionItems = [
-    {
-      id: "profile",
-      label: "Profile",
-      icon: UserRound,
-    },
-    {
-      id: "password",
-      label: "Change Password",
-      icon: LockKeyhole,
-    },
-    {
-      id: "theme",
-      label: "Theme",
-      icon: Palette,
-    },
-    {
-      id: "about",
-      label: "About SmartScreen AI",
-      icon: Info,
-    },
+    { id: "profile", label: "Profile", icon: UserRound },
+    { id: "password", label: "Change Password", icon: LockKeyhole },
+    { id: "theme", label: "Theme", icon: Palette },
+    { id: "about", label: "About SmartScreen AI", icon: Info },
   ];
 
   return (
@@ -207,9 +258,7 @@ function SettingsPanel({ onClose }) {
         <div className="settings-header">
           <div>
             <h2>Settings</h2>
-            <p>
-              Manage your SmartScreen AI preferences
-            </p>
+            <p>Manage your SmartScreen AI preferences</p>
           </div>
 
           <button
@@ -226,21 +275,16 @@ function SettingsPanel({ onClose }) {
           <div className="settings-sidebar">
             {sectionItems.map((item) => {
               const Icon = item.icon;
-              const isActive =
-                activeSection === item.id;
+              const isActive = activeSection === item.id;
 
               return (
                 <button
                   key={item.id}
                   type="button"
                   className={`settings-nav-item ${
-                    isActive
-                      ? "settings-nav-item-active"
-                      : ""
+                    isActive ? "settings-nav-item-active" : ""
                   }`}
-                  onClick={() =>
-                    setActiveSection(item.id)
-                  }
+                  onClick={() => setActiveSection(item.id)}
                 >
                   <Icon size={18} />
                   <span>{item.label}</span>
@@ -255,12 +299,13 @@ function SettingsPanel({ onClose }) {
                 <div className="settings-section-title">
                   <div>
                     <h3>Profile</h3>
-                    <p>
-                      Manage your SmartScreen AI profile
-                      information.
-                    </p>
+                    <p>Manage your SmartScreen AI profile information.</p>
                   </div>
                 </div>
+
+                {profileLoading && (
+                  <p>Loading your profile...</p>
+                )}
 
                 <div className="profile-image-section">
                   <div className="profile-image-wrapper">
@@ -280,8 +325,8 @@ function SettingsPanel({ onClose }) {
                   <div className="profile-image-info">
                     <h4>Profile Image</h4>
                     <p>
-                      Upload an image to personalize
-                      your SmartScreen AI profile.
+                      Upload an image to personalize your SmartScreen AI
+                      profile.
                     </p>
 
                     <input
@@ -295,9 +340,7 @@ function SettingsPanel({ onClose }) {
                     <button
                       type="button"
                       className="settings-secondary-button"
-                      onClick={() =>
-                        fileInputRef.current?.click()
-                      }
+                      onClick={() => fileInputRef.current?.click()}
                     >
                       <Camera size={16} />
                       Change Image
@@ -307,46 +350,37 @@ function SettingsPanel({ onClose }) {
 
                 <div className="settings-form-grid">
                   <div className="settings-form-group">
-                    <label htmlFor="profileName">
-                      HR Name
-                    </label>
-
+                    <label htmlFor="profileName">HR Name</label>
                     <input
                       id="profileName"
                       type="text"
+                      maxLength={255}
                       value={profileName}
-                      onChange={(event) =>
-                        setProfileName(
-                          event.target.value
-                        )
-                      }
+                      onChange={(event) => {
+                        setProfileName(event.target.value);
+                        setProfileSaved(false);
+                      }}
                       placeholder="Enter HR name"
                     />
                   </div>
 
                   <div className="settings-form-group">
-                    <label htmlFor="username">
-                      Username
-                    </label>
-
+                    <label htmlFor="username">Username</label>
                     <input
                       id="username"
                       type="text"
+                      maxLength={255}
                       value={username}
-                      onChange={(event) =>
-                        setUsername(
-                          event.target.value
-                        )
-                      }
+                      onChange={(event) => {
+                        setUsername(event.target.value);
+                        setProfileSaved(false);
+                      }}
                       placeholder="Enter username"
                     />
                   </div>
 
                   <div className="settings-form-group">
-                    <label htmlFor="role">
-                      Role
-                    </label>
-
+                    <label htmlFor="role">Role</label>
                     <input
                       id="role"
                       type="text"
@@ -356,13 +390,35 @@ function SettingsPanel({ onClose }) {
                   </div>
                 </div>
 
+                {profileError && (
+                  <div
+                    className="settings-message settings-message-error"
+                    role="alert"
+                  >
+                    {profileError}
+                  </div>
+                )}
+
+                {profileSaved && (
+                  <div
+                    className="settings-message settings-message-success"
+                    role="status"
+                  >
+                    <Check size={17} />
+                    Profile saved successfully.
+                  </div>
+                )}
+
                 <div className="settings-actions">
                   <button
                     type="button"
                     className="settings-primary-button"
                     onClick={handleSaveProfile}
+                    disabled={profileSaving || profileLoading}
                   >
-                    {profileSaved ? (
+                    {profileSaving ? (
+                      "Saving Profile..."
+                    ) : profileSaved ? (
                       <>
                         <Check size={16} />
                         Saved
@@ -384,8 +440,7 @@ function SettingsPanel({ onClose }) {
                   <div>
                     <h3>Change Password</h3>
                     <p>
-                      Update your SmartScreen AI account
-                      password securely.
+                      Update your SmartScreen AI account password securely.
                     </p>
                   </div>
                 </div>
@@ -395,34 +450,21 @@ function SettingsPanel({ onClose }) {
                   onSubmit={handleChangePassword}
                 >
                   <div className="settings-form-group">
-                    <label htmlFor="currentPassword">
-                      Current Password
-                    </label>
-
+                    <label htmlFor="currentPassword">Current Password</label>
                     <div className="settings-password-input">
                       <input
                         id="currentPassword"
-                        type={
-                          showCurrentPassword
-                            ? "text"
-                            : "password"
-                        }
+                        type={showCurrentPassword ? "text" : "password"}
                         value={currentPassword}
                         onChange={(event) =>
-                          setCurrentPassword(
-                            event.target.value
-                          )
+                          setCurrentPassword(event.target.value)
                         }
                         placeholder="Enter current password"
                       />
-
                       <button
                         type="button"
                         onClick={() =>
-                          setShowCurrentPassword(
-                            (previous) =>
-                              !previous
-                          )
+                          setShowCurrentPassword((previous) => !previous)
                         }
                         aria-label={
                           showCurrentPassword
@@ -440,34 +482,21 @@ function SettingsPanel({ onClose }) {
                   </div>
 
                   <div className="settings-form-group">
-                    <label htmlFor="newPassword">
-                      New Password
-                    </label>
-
+                    <label htmlFor="newPassword">New Password</label>
                     <div className="settings-password-input">
                       <input
                         id="newPassword"
-                        type={
-                          showNewPassword
-                            ? "text"
-                            : "password"
-                        }
+                        type={showNewPassword ? "text" : "password"}
                         value={newPassword}
                         onChange={(event) =>
-                          setNewPassword(
-                            event.target.value
-                          )
+                          setNewPassword(event.target.value)
                         }
                         placeholder="Enter new password"
                       />
-
                       <button
                         type="button"
                         onClick={() =>
-                          setShowNewPassword(
-                            (previous) =>
-                              !previous
-                          )
+                          setShowNewPassword((previous) => !previous)
                         }
                         aria-label={
                           showNewPassword
@@ -482,10 +511,8 @@ function SettingsPanel({ onClose }) {
                         )}
                       </button>
                     </div>
-
                     <small>
-                      Password must be at least 8
-                      characters long.
+                      Password must be at least 8 characters long.
                     </small>
                   </div>
 
@@ -493,31 +520,20 @@ function SettingsPanel({ onClose }) {
                     <label htmlFor="confirmPassword">
                       Confirm New Password
                     </label>
-
                     <div className="settings-password-input">
                       <input
                         id="confirmPassword"
-                        type={
-                          showConfirmPassword
-                            ? "text"
-                            : "password"
-                        }
+                        type={showConfirmPassword ? "text" : "password"}
                         value={confirmPassword}
                         onChange={(event) =>
-                          setConfirmPassword(
-                            event.target.value
-                          )
+                          setConfirmPassword(event.target.value)
                         }
                         placeholder="Confirm new password"
                       />
-
                       <button
                         type="button"
                         onClick={() =>
-                          setShowConfirmPassword(
-                            (previous) =>
-                              !previous
-                          )
+                          setShowConfirmPassword((previous) => !previous)
                         }
                         aria-label={
                           showConfirmPassword
@@ -573,65 +589,50 @@ function SettingsPanel({ onClose }) {
                   <div>
                     <h3>Theme</h3>
                     <p>
-                      Choose the appearance you want
-                      for SmartScreen AI.
+                      Choose the appearance you want for SmartScreen AI.
                     </p>
                   </div>
                 </div>
 
                 <div className="theme-options">
-                  {Object.entries(themes).map(
-                    ([themeKey, theme]) => {
-                      const isSelected =
-                        settings.theme ===
-                        themeKey;
+                  {Object.entries(themes).map(([themeKey, theme]) => {
+                    const isSelected = settings.theme === themeKey;
 
-                      return (
-                        <button
-                          key={themeKey}
-                          type="button"
-                          className={`theme-card ${
-                            isSelected
-                              ? "theme-card-selected"
-                              : ""
-                          }`}
-                          onClick={() =>
-                            handleThemeChange(
-                              themeKey
-                            )
-                          }
+                    return (
+                      <button
+                        key={themeKey}
+                        type="button"
+                        className={`theme-card ${
+                          isSelected ? "theme-card-selected" : ""
+                        }`}
+                        onClick={() => handleThemeChange(themeKey)}
+                      >
+                        <div
+                          className={`theme-preview theme-preview-${themeKey}`}
                         >
-                          <div
-                            className={`theme-preview theme-preview-${themeKey}`}
-                          >
-                            <div className="theme-preview-sidebar" />
-                            <div className="theme-preview-main">
-                              <div className="theme-preview-line theme-preview-line-long" />
-                              <div className="theme-preview-line" />
-                              <div className="theme-preview-card" />
-                            </div>
+                          <div className="theme-preview-sidebar" />
+                          <div className="theme-preview-main">
+                            <div className="theme-preview-line theme-preview-line-long" />
+                            <div className="theme-preview-line" />
+                            <div className="theme-preview-card" />
+                          </div>
+                        </div>
+
+                        <div className="theme-card-content">
+                          <div>
+                            <h4>{theme.name}</h4>
+                            <p>{theme.description}</p>
                           </div>
 
-                          <div className="theme-card-content">
-                            <div>
-                              <h4>
-                                {theme.name}
-                              </h4>
-                              <p>
-                                {theme.description}
-                              </p>
+                          {isSelected && (
+                            <div className="theme-selected-icon">
+                              <Check size={17} />
                             </div>
-
-                            {isSelected && (
-                              <div className="theme-selected-icon">
-                                <Check size={17} />
-                              </div>
-                            )}
-                          </div>
-                        </button>
-                      );
-                    }
-                  )}
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -640,13 +641,8 @@ function SettingsPanel({ onClose }) {
               <div className="settings-section">
                 <div className="settings-section-title">
                   <div>
-                    <h3>
-                      About SmartScreen AI
-                    </h3>
-                    <p>
-                      Information about the
-                      application.
-                    </p>
+                    <h3>About SmartScreen AI</h3>
+                    <p>Information about the application.</p>
                   </div>
                 </div>
 
@@ -654,23 +650,13 @@ function SettingsPanel({ onClose }) {
                   <div className="about-icon">
                     <ScanSearchIcon />
                   </div>
-
                   <div className="about-main">
-                    <h3>
-                      SmartScreen AI
-                    </h3>
-
-                    <p className="about-version">
-                      Version 1.0.0
-                    </p>
-
+                    <h3>SmartScreen AI</h3>
+                    <p className="about-version">Version 1.0.0</p>
                     <p>
-                      Automated Resume Screening
-                      System designed to help HR
-                      teams process resumes, evaluate
-                      candidates against job
-                      requirements, and manage
-                      screening results efficiently.
+                      Automated Resume Screening System designed to help HR
+                      teams process resumes, evaluate candidates against job
+                      requirements, and manage screening results efficiently.
                     </p>
                   </div>
                 </div>
@@ -678,21 +664,15 @@ function SettingsPanel({ onClose }) {
                 <div className="about-details">
                   <div className="about-detail-row">
                     <span>Application</span>
-                    <strong>
-                      SmartScreen AI
-                    </strong>
+                    <strong>SmartScreen AI</strong>
                   </div>
-
                   <div className="about-detail-row">
                     <span>Version</span>
                     <strong>1.0.0</strong>
                   </div>
-
                   <div className="about-detail-row">
                     <span>Purpose</span>
-                    <strong>
-                      Automated Resume Screening
-                    </strong>
+                    <strong>Automated Resume Screening</strong>
                   </div>
                 </div>
               </div>
@@ -717,9 +697,7 @@ function SettingsPanel({ onClose }) {
 function ScanSearchIcon() {
   return (
     <div className="about-logo-mark">
-      <div className="about-logo-inner">
-        AI
-      </div>
+      <div className="about-logo-inner">AI</div>
     </div>
   );
 }

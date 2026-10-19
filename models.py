@@ -3,6 +3,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from database import Base
 
+
 class User(Base):
     __tablename__ = "users"
 
@@ -16,7 +17,15 @@ class User(Base):
 
     role = Column(String(50), nullable=False, default="HR")
 
+    # Persisted profile settings
+    profile_name = Column(String(255), nullable=True)
+
+    profile_username = Column(String(255), nullable=True)
+
+    profile_image = Column(Text, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now())
+
 
 
 class Job(Base):

@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
-
 const GOOGLE_SHEETS_URL =
-  "https://docs.google.com/spreadsheets/d/1KRWgr4JzxuIYETaX1xKdmLQgO86pD7ZPW87xQ8O3F3w/edit?gid=0#gid=0";
+  import.meta.env.VITE_GOOGLE_SHEETS_URL || "";
 
 function Screening() {
   const [step, setStep] = useState(1);
@@ -164,7 +163,7 @@ function Screening() {
         const currentResults = Array.isArray(data.results)
           ? data.results
           : [];
-
+          console.log("Screening API results:", currentResults);
         // Update results whenever new results are available
         setResults(currentResults);
 
@@ -977,18 +976,27 @@ function Screening() {
               </p>
             </div>
 
-            <button
-              type="button"
-              className="export-sheets-button"
-              onClick={() => {
-                window.open(
-                  GOOGLE_SHEETS_URL,
-                  "_blank"
-                );
-              }}
-            >
-              ↗ Visit Google Sheets
-            </button>
+            
+<button
+  type="button"
+  className="export-sheets-button"
+  onClick={() => {
+    if (GOOGLE_SHEETS_URL) {
+      window.open(
+        GOOGLE_SHEETS_URL,
+        "_blank",
+        "noopener,noreferrer"
+      );
+    } else {
+      setResultsError(
+        "Google Sheets URL is not configured. Please set VITE_GOOGLE_SHEETS_URL in your frontend .env file."
+      );
+    }
+  }}
+>
+  ↗ Visit Google Sheets
+</button>
+
           </div>
 
           <div className="results-summary-cards">
@@ -1176,7 +1184,11 @@ function Screening() {
                             "Unknown Candidate"}
                         </span>
 
-                        <span>—</span>
+                        <span>
+  {candidate.applied_date
+    ? new Date(candidate.applied_date).toLocaleDateString("en-IN")
+    : "—"}
+</span>
 
                         <span className="score-cell">
                           {score !== null

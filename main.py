@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from sqlalchemy.orm import Session
-
+from sqlalchemy import text
 # Load environment variables first
 load_dotenv(override=False)
 CORS_ORIGINS = [
@@ -26,20 +26,26 @@ if not CORS_ORIGINS:
 # =========================================================
 # Email configuration
 # =========================================================
+
 SMTP_EMAIL = os.getenv("SMTP_EMAIL", "").strip()
 SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "").replace(" ", "").strip()
 
-MAIL_CONFIG = ConnectionConfig(
-    MAIL_USERNAME=SMTP_EMAIL,
-    MAIL_PASSWORD=SMTP_APP_PASSWORD,
-    MAIL_FROM=SMTP_EMAIL,
-    MAIL_PORT=587,
-    MAIL_SERVER="smtp.gmail.com",
-    MAIL_STARTTLS=True,
-    MAIL_SSL_TLS=False,
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=True,
-)
+# Configure email only when both SMTP credentials are available.
+MAIL_CONFIG = None
+
+if SMTP_EMAIL and SMTP_APP_PASSWORD:
+    MAIL_CONFIG = ConnectionConfig(
+        MAIL_USERNAME=SMTP_EMAIL,
+        MAIL_PASSWORD=SMTP_APP_PASSWORD,
+        MAIL_FROM=SMTP_EMAIL,
+        MAIL_PORT=587,
+        MAIL_SERVER="smtp.gmail.com",
+        MAIL_STARTTLS=True,
+        MAIL_SSL_TLS=False,
+        USE_CREDENTIALS=True,
+        VALIDATE_CERTS=True,
+    )
+
     
 from auth import (
     LoginRequest,
@@ -77,8 +83,31 @@ from schemas import (
     ResetPasswordRequest,
 )
 
+
 # Create database tables
 Base.metadata.create_all(bind=engine)
+
+# Safely add profile columns to existing PostgreSQL databases.
+with engine.begin() as connection:
+    connection.execute(
+        text(
+            "ALTER TABLE users "
+            "ADD COLUMN IF NOT EXISTS profile_name VARCHAR(255)"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE users "
+            "ADD COLUMN IF NOT EXISTS profile_username VARCHAR(255)"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE users "
+            "ADD COLUMN IF NOT EXISTS profile_image TEXT"
+        )
+    )
+
 
 # =========================================================
 # Initialize first HR user for a fresh database
@@ -166,7 +195,10 @@ app.add_middleware(
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
-
+class ProfileUpdateRequest(BaseModel):
+    profile_name: str
+    profile_username: str
+    profile_image: str | None = None
 
 
 @app.post("/api/auth/login")
@@ -210,7 +242,93 @@ def login(
 # =========================================================
 # Refresh Token
 # =========================================================
+@app.get("/api/auth/profile")
+def get_profile(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_hr),
+):
+    account_username = current_user.get("username")
 
+    user = (
+        db.query(User)
+        .filter(User.username == account_username)
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User account not found",
+        )
+
+    return {
+        "account_username": user.username,
+        "profile_name": user.profile_name or user.username,
+        "profile_username": (
+            user.profile_username or user.username
+        ),
+        "profile_image": user.profile_image or "",
+        "role": user.role,
+    }
+
+
+@app.put("/api/auth/profile")
+def update_profile(
+    profile: ProfileUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_hr),
+):
+    account_username = current_user.get("username")
+
+    user = (
+        db.query(User)
+        .filter(User.username == account_username)
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User account not found",
+        )
+
+    profile_name = profile.profile_name.strip()
+    profile_username = profile.profile_username.strip()
+    profile_image = profile.profile_image or ""
+
+    if not profile_name or not profile_username:
+        raise HTTPException(
+            status_code=422,
+            detail="Profile name and username cannot be empty",
+        )
+
+    if len(profile_name) > 255 or len(profile_username) > 255:
+        raise HTTPException(
+            status_code=422,
+            detail="Profile name and username must be 255 characters or fewer",
+        )
+
+    if len(profile_image) > 1_500_000:
+        raise HTTPException(
+            status_code=413,
+            detail="Profile image is too large. Please use a smaller image.",
+        )
+
+    user.profile_name = profile_name
+    user.profile_username = profile_username
+    user.profile_image = profile_image
+
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Profile saved successfully",
+        "account_username": user.username,
+        "profile_name": user.profile_name,
+        "profile_username": user.profile_username,
+        "profile_image": user.profile_image or "",
+        "role": user.role,
+    }
 @app.post("/api/auth/refresh")
 def refresh_access_token(data: RefreshTokenRequest):
     user = verify_refresh_token(data.refresh_token)
@@ -305,12 +423,19 @@ async def forgot_password(
     generic_response = {
         "message": "If an account exists for that email, a reset link will be sent."
     }
+    
     email = data.email.strip().lower()
     user = db.query(User).filter(User.email == email).first()
     if not user:
         return generic_response
 
+    # Keep the endpoint safe when SMTP is not configured.
+    if MAIL_CONFIG is None:
+        print("Password reset email not sent because SMTP is not configured.")
+        return generic_response
+
     now = datetime.now(timezone.utc)
+
     # Invalidate earlier outstanding reset links and remove expired records.
     db.query(PasswordResetToken).filter(
         (PasswordResetToken.expires_at <= now)
@@ -445,6 +570,18 @@ def root():
 # Local OCR
 # =========================================================
 
+_ocr_reader = None
+
+
+def get_ocr_reader():
+    global _ocr_reader
+
+    if _ocr_reader is None:
+        import easyocr
+        _ocr_reader = easyocr.Reader(["en"], gpu=False)
+
+    return _ocr_reader
+
 @app.post("/api/ocr")
 async def local_ocr(
     file: UploadFile = File(...),
@@ -483,7 +620,6 @@ async def local_ocr(
     try:
         from io import BytesIO
         import numpy as np
-        import easyocr
         from PIL import Image
 
         image_buffer = BytesIO(content)
@@ -496,7 +632,7 @@ async def local_ocr(
             rgb_image = image.convert("RGB")
             image_array = np.array(rgb_image)
 
-        reader = easyocr.Reader(["en"], gpu=False)
+        reader = get_ocr_reader()
 
         detected_text = reader.readtext(
             image_array,
@@ -590,15 +726,11 @@ def create_job(
 @app.put("/api/jobs/{job_id}", response_model=JobResponse)
 def update_job(
     job_id: int,
-    job_data: dict,
+    job_data: JobCreate,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_hr)
 ):
-    job = (
-        db.query(Job)
-        .filter(Job.id == job_id)
-        .first()
-    )
+    job = db.query(Job).filter(Job.id == job_id).first()
 
     if not job:
         raise HTTPException(
@@ -606,17 +738,23 @@ def update_job(
             detail="Job not found"
         )
 
-    if "job_title" in job_data:
-        job.job_title = job_data["job_title"]
+    total_weight = (
+        job_data.required_skills_weight
+        + job_data.relevant_experience_weight
+        + job_data.education_weight
+        + job_data.projects_weight
+        + job_data.preferred_skills_weight
+        + job_data.overall_alignment_weight
+    )
 
-    if "job_description" in job_data:
-        job.job_description = job_data["job_description"]
+    if abs(total_weight - 100) > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Scoring weights must total 100%. Current total: {total_weight}%"
+        )
 
-    if "required_skills" in job_data:
-        job.required_skills = job_data["required_skills"]
-
-    if "required_experience" in job_data:
-        job.required_experience = job_data["required_experience"]
+    for field, value in job_data.dict().items():
+        setattr(job, field, value)
 
     db.commit()
     db.refresh(job)
@@ -660,6 +798,23 @@ def get_jobs(
     )
 
     return jobs
+
+@app.get("/api/jobs/{job_id}", response_model=JobResponse)
+def get_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_hr)
+):
+    job = db.query(Job).filter(Job.id == job_id).first()
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    return job
+
 # =========================================================
 # Dashboard Overview
 # =========================================================
@@ -2246,22 +2401,27 @@ def get_screening_results(
     # Newest score first
     # -----------------------------------------------------
     rows = (
-        db.query(
-            ScreeningScore,
-            Candidate
-        )
-        .join(
-            Candidate,
-            Candidate.id == ScreeningScore.candidate_id
-        )
-        .filter(
-            ScreeningScore.screening_id.in_(screening_ids)
-        )
-        .order_by(
-            ScreeningScore.id.desc()
-        )
-        .all()
+    db.query(
+        ScreeningScore,
+        Candidate,
+        Resume.uploaded_at
     )
+    .join(
+        Candidate,
+        Candidate.id == ScreeningScore.candidate_id
+    )
+    .outerjoin(
+        Resume,
+        Resume.id == ScreeningScore.resume_id
+    )
+    .filter(
+        ScreeningScore.screening_id.in_(screening_ids)
+    )
+    .order_by(
+        ScreeningScore.id.desc()
+    )
+    .all()
+)
 
     # -----------------------------------------------------
     # Keep latest result per candidate
@@ -2269,7 +2429,7 @@ def get_screening_results(
     results = []
     seen_candidate_ids = set()
 
-    for score, candidate in rows:
+    for score, candidate, uploaded_at in rows:
 
         if candidate.id in seen_candidate_ids:
             continue
@@ -2282,6 +2442,12 @@ def get_screening_results(
             "email": candidate.email,
             "phone": candidate.phone,
             "location": candidate.location,
+            
+"applied_date": (
+    uploaded_at.isoformat()
+    if uploaded_at
+    else None
+),
 
             "required_skills_score": (
                 float(score.required_skills_score)
@@ -2493,30 +2659,34 @@ def export_screening_results(
     # Newest first
     # -----------------------------------------------------
     rows = (
-        db.query(
-            ScreeningScore,
-            Candidate
-        )
-        .join(
-            Candidate,
-            Candidate.id == ScreeningScore.candidate_id
-        )
-        .filter(
-            ScreeningScore.screening_id.in_(screening_ids)
-        )
-        .order_by(
-            ScreeningScore.id.desc()
-        )
-        .all()
+    db.query(
+        ScreeningScore,
+        Candidate,
+        Resume.uploaded_at
     )
-
+    .join(
+        Candidate,
+        Candidate.id == ScreeningScore.candidate_id
+    )
+    .outerjoin(
+        Resume,
+        Resume.id == ScreeningScore.resume_id
+    )
+    .filter(
+        ScreeningScore.screening_id.in_(screening_ids)
+    )
+    .order_by(
+        ScreeningScore.id.desc()
+    )
+    .all()
+)
     # -----------------------------------------------------
     # Keep only latest result per candidate
     # -----------------------------------------------------
     export_results = []
     seen_candidate_ids = set()
 
-    for score, candidate in rows:
+    for score, candidate, uploaded_at in rows:
 
         if candidate.id in seen_candidate_ids:
             continue
@@ -2530,6 +2700,7 @@ def export_screening_results(
             "email": candidate.email,
             "phone": candidate.phone,
             "location": candidate.location,
+            
 
             "required_skills_score": (
                 float(score.required_skills_score)
